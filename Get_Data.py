@@ -1,14 +1,7 @@
 import pandas as pd
-import numpy as np
 import yfinance as yf
 
-def get_data(stocks: list[str], start: str, end: str) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    """
-    Fetch historical data and calculate daily returns, mean returns, and covariance matrix.
-    Robust to MultiIndex columns and missing 'Adj Close' (falls back to 'Close').
-    """
-
-    # Clean tickers
+def get_data(stocks, start, end):
     tickers = [str(t).strip().upper() for t in stocks if str(t).strip()]
     if not tickers:
         raise ValueError("No tickers provided.")
@@ -24,14 +17,10 @@ def get_data(stocks: list[str], start: str, end: str) -> tuple[pd.DataFrame, pd.
     )
 
     if df is None or df.empty:
-        raise ValueError(
-            "No data returned from Yahoo Finance. "
-            "Check tickers, date range, and app internet access."
-        )
+        raise ValueError("No data returned from Yahoo Finance. Check tickers/date range.")
 
-    # Extract a prices dataframe with columns = tickers
+    # Extract prices as DataFrame with columns = tickers
     if isinstance(df.columns, pd.MultiIndex):
-        # Common case for multiple tickers
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
 
@@ -44,32 +33,13 @@ def get_data(stocks: list[str], start: str, end: str) -> tuple[pd.DataFrame, pd.
         elif "Close" in lvl1:
             prices = df.xs("Close", axis=1, level=1)
         else:
-            raise KeyError(
-                "Could not find 'Adj Close' or 'Close' in downloaded data. "
-                f"Available column levels: {sorted(set(lvl0))} / {sorted(set(lvl1))}"
-            )
+            raise KeyError(f"Could not find 'Adj Close' or 'Close' in returned columns: {df.columns}")
     else:
-        # Single ticker often returns single-level columns
+        # Single ticker case
         if "Adj Close" in df.columns:
             prices = df[["Adj Close"]].rename(columns={"Adj Close": tickers[0]})
         elif "Close" in df.columns:
             prices = df[["Close"]].rename(columns={"Close": tickers[0]})
         else:
-            raise KeyError(
-                "Could not find 'Adj Close' or 'Close' in downloaded data. "
-                f"Available columns: {list(df.columns)}"
-            )
+            raise KeyError(f"Could not find 'Adj Close' or 'Close' in
 
-    # Drop rows where all tickers are missing
-    prices = prices.dropna(how="all")
-    if prices.empty:
-        raise ValueError("Price table is empty after cleaning missing rows.")
-
-    returns = prices.pct_change().dropna()
-    if returns.empty:
-        raise ValueError("Not enough data to compute returns. Try a longer date range.")
-
-    mean_returns = returns.mean()
-    cov_matrix = returns.cov()
-
-    return returns, mean_returns, cov_matrix
