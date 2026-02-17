@@ -3,13 +3,78 @@ import pandas as pd
 import datetime as dt
 import matplotlib.pyplot as plt
 import streamlit as st
+import yfinance as yf
 
-from Get_Data import get_data
 from Value_At_Risk import MonteCarlo
 
 
+def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
+    """
+    Download prices from yfinance and return a DataFrame with columns = tickers.
+    Tries 'Adj Close' first, then falls back to 'Close'. Handles MultiIndex outputs.
+    """
+    df = yf.download(
+        tickers,
+        start=start,
+        end=end,
+        auto_adjust=False,
+        group_by="column",
+        progress=False,
+        threads=True,
+    )
+
+    if df is None or df.empty:
+        raise ValueError("No data returned from Yahoo Finance. Check tickers/date range.")
+
+    # MultiIndex case (common for multiple tickers)
+    if isinstance(df.columns, pd.MultiIndex):
+        lvl0 = df.columns.get_level_values(0)
+        lvl1 = df.columns.get_level_values(1)
+
+        if "Adj Close" in lvl0:
+            prices = df["Adj Close"]
+        elif "Close" in lvl0:
+            prices = df["Close"]
+        elif "Adj Close" in lvl1:
+            prices = df.xs("Adj Close", axis=1, level=1)
+        elif "Close" in lvl1:
+            prices = df.xs("Close", axis=1, level=1)
+        else:
+            raise KeyError(
+                f"Could not find 'Adj Close' or 'Close'. "
+                f"lvl0={sorted(set(lvl0))}, lvl1={sorted(set(lvl1))}"
+            )
+
+    # Single ticker case (single-level columns)
+    else:
+        if "Adj Close" in df.columns:
+            prices = df[["Adj Close"]].rename(columns={"Adj Close": tickers[0]})
+        elif "Close" in df.columns:
+            prices = df[["Close"]].rename(columns={"Close": tickers[0]})
+        else:
+            raise KeyError(f"Could not find 'Adj Close' or 'Close'. Columns: {list(df.columns)}")
+
+    prices = prices.dropna(how="all")
+    if prices.empty:
+        raise ValueError("Prices are empty after dropping missing rows.")
+
+    return prices
+
+
+def get_data_local(tickers: list[str], start: str, end: str):
+    """
+    Returns: returns, mean_returns, cov_matrix
+    """
+    prices = fetch_prices(tickers, start, end)
+    returns = prices.pct_change().dropna()
+    if returns.empty:
+        raise ValueError("Not enough data to compute returns. Try a longer date range.")
+    mean_returns = returns.mean()
+    cov_matrix = returns.cov()
+    return returns, mean_returns, cov_matrix
+
+
 def main():
-    # PAGE SETTINGS
     st.set_page_config(
         page_title="Value at Risk Calculator",
         page_icon="📈",
@@ -22,12 +87,9 @@ def main():
     st.markdown("This tool is just a **SUGGESTION**, please invest at your own risk!")
     st.write("Click **Run Simulation** to begin.")
 
-    # SIDEBAR SETTINGS
     st.sidebar.title("⚙️ Settings")
 
-    # Expander for Data Settings
     with st.sidebar.expander("📊 Data Settings", expanded=True):
-        # Input: Stock tickers (robust parsing)
         tickers_raw = st.text_input(
             "Stock Tickers",
             "SPY, QQQ, SMH, GLD, TLT",
@@ -35,7 +97,6 @@ def main():
         )
         stock_list = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
 
-        # Input: Weights
         weights_input = st.text_input(
             "Portfolio Weights",
             "0.2, 0.2, 0.2, 0.2, 0.2",
@@ -43,7 +104,6 @@ def main():
         )
         weights = np.array([float(w.strip()) for w in weights_input.split(",") if w.strip()], dtype=float)
 
-        # Input: Number of years for historical data
         years_of_data = st.number_input(
             "Years of Historical Data",
             min_value=1,
@@ -55,14 +115,12 @@ def main():
         end_date = dt.datetime.now().strftime("%Y-%m-%d")
         start_date = (dt.datetime.now() - dt.timedelta(days=int(years_of_data) * 365)).strftime("%Y-%m-%d")
 
-        # Input: Portfolio initial value
         portfolio_value = st.number_input(
             "Initial Portfolio Value ($):",
             value=10000.0,
             help="Account balance",
         )
 
-    # Expander for Simulation Settings
     with st.sidebar.expander("🎲 Simulation Settings", expanded=True):
         col1, col2 = st.columns(2)
 
@@ -96,10 +154,8 @@ def main():
 
     risk_level = 1.0 - confidence_interval
 
-    # RUN SIMULATION
     if st.sidebar.button("Run Simulation"):
         try:
-            # Basic validation
             if len(stock_list) == 0:
                 st.error("Please enter at least one ticker.")
                 st.stop()
@@ -112,10 +168,8 @@ def main():
                 st.error(f"Weights must sum to 1. Current sum: {weights.sum():.6f}")
                 st.stop()
 
-            # Fetch data
-            returns, mean_returns, cov_matrix = get_data(stock_list, start=start_date, end=end_date)
+            returns, mean_returns, cov_matrix = get_data_local(stock_list, start=start_date, end=end_date)
 
-            # Run Monte Carlo simulation (uses your Value_At_Risk.py implementation)
             portfolio_sims = MonteCarlo.run_simulation(
                 weights=weights,
                 mean_returns=mean_returns,
@@ -125,10 +179,8 @@ def main():
                 simulations=int(simulations),
             )
 
-            # Calculate VaR
             VaR = MonteCarlo.calculate_var(portfolio_sims, confidence_interval, float(portfolio_value))
 
-            # Settings table
             settings_data = {
                 "Parameter": [
                     "Stock Tickers",
@@ -159,22 +211,18 @@ def main():
             }
             settings_df = pd.DataFrame(settings_data).set_index("Parameter")
 
-            # Layout for plots
             plot_col1, plot_col2 = st.columns(2)
 
-            # Plot simulation results
             with plot_col1:
                 st.write("### Simulation Results")
                 fig, ax = plt.subplots(figsize=(6, 4))
 
-                # Plot a capped number of paths for speed/clarity
                 max_paths_to_plot = min(int(simulations), 300)
                 for i in range(max_paths_to_plot):
                     ax.plot(portfolio_sims[:, i], alpha=0.20, linewidth=0.7)
 
                 mean_path = np.mean(portfolio_sims, axis=1)
                 ax.plot(mean_path, linewidth=2, label="Mean Simulation")
-
                 ax.axhline(
                     y=(float(portfolio_value) - VaR),
                     linewidth=1,
@@ -187,7 +235,6 @@ def main():
                 ax.legend(loc="upper left")
                 st.pyplot(fig)
 
-            # Plot histogram of final portfolio values
             with plot_col2:
                 st.write("### Distribution of Final Portfolio Values")
                 final_values = portfolio_sims[-1, :]
@@ -198,7 +245,6 @@ def main():
                 ax2.set_title("Distribution of Final Portfolio Values")
                 st.pyplot(fig2)
 
-            # Display settings + interpretation
             st.write("#### Simulation and Data Settings")
             st.dataframe(settings_df)
 
