@@ -4,6 +4,7 @@ import datetime as dt
 import matplotlib.pyplot as plt
 import streamlit as st
 import yfinance as yf
+st.write("DEPLOY CHECK: streamval v5")
 
 from Value_At_Risk import MonteCarlo
 
@@ -265,3 +266,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
