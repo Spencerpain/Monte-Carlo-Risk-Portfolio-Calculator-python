@@ -4,7 +4,6 @@ import datetime as dt
 import matplotlib.pyplot as plt
 import streamlit as st
 import yfinance as yf
-st.write("DEPLOY CHECK: streamval v5")
 
 from Value_At_Risk import MonteCarlo
 
@@ -45,9 +44,8 @@ def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
                 f"Could not find 'Adj Close' or 'Close'. "
                 f"lvl0={sorted(set(lvl0))}, lvl1={sorted(set(lvl1))}"
             )
-
-    # Single ticker case (single-level columns)
     else:
+        # Single ticker case
         if "Adj Close" in df.columns:
             prices = df[["Adj Close"]].rename(columns={"Adj Close": tickers[0]})
         elif "Close" in df.columns:
@@ -55,23 +53,54 @@ def fetch_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
         else:
             raise KeyError(f"Could not find 'Adj Close' or 'Close'. Columns: {list(df.columns)}")
 
-    prices = prices.dropna(how="all")
+    prices = prices.dropna(how="all").sort_index()
     if prices.empty:
         raise ValueError("Prices are empty after dropping missing rows.")
-
     return prices
 
 
 def get_data_local(tickers: list[str], start: str, end: str):
     """
-    Returns: returns, mean_returns, cov_matrix
+    Returns: returns (DataFrame), mean_returns (Series), cov_matrix (DataFrame)
+    More robust to partial missing data than pct_change().dropna().
     """
     prices = fetch_prices(tickers, start, end)
-    returns = prices.pct_change().dropna()
+
+    # Diagnostics (useful on Streamlit Cloud)
+    st.write("Downloaded prices shape:", prices.shape)
+    st.write("Price columns (tickers):", list(prices.columns))
+
+    # Drop tickers with no data at all
+    all_nan_cols = prices.columns[prices.isna().all()].tolist()
+    if all_nan_cols:
+        st.warning(f"Dropping tickers with no data: {', '.join(all_nan_cols)}")
+        prices = prices.drop(columns=all_nan_cols)
+
+    if prices.shape[1] == 0:
+        raise ValueError("No tickers have usable price data. Try different tickers.")
+
+    # Keep rows where at least one ticker has data, then fill gaps
+    prices = prices.dropna(how="all").ffill()
+
+    if prices.shape[0] < 2:
+        raise ValueError(
+            f"Not enough price rows ({prices.shape[0]}) to compute returns. "
+            "Try a longer date range or different tickers."
+        )
+
+    returns = prices.pct_change().dropna(how="all")
+
     if returns.empty:
-        raise ValueError("Not enough data to compute returns. Try a longer date range.")
+        st.write("Prices head:", prices.head())
+        st.write("Prices tail:", prices.tail())
+        raise ValueError(
+            "Not enough data to compute returns after cleaning. "
+            "This usually means Yahoo returned mostly missing values or tickers are invalid."
+        )
+
     mean_returns = returns.mean()
     cov_matrix = returns.cov()
+
     return returns, mean_returns, cov_matrix
 
 
@@ -98,12 +127,12 @@ def main():
         )
         stock_list = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
 
-        weights_input = st.text_input(
+        weights_raw = st.text_input(
             "Portfolio Weights",
             "0.2, 0.2, 0.2, 0.2, 0.2",
             help="Enter portfolio weights separated by commas (must sum to 1).",
         )
-        weights = np.array([float(w.strip()) for w in weights_input.split(",") if w.strip()], dtype=float)
+        weights = np.array([float(w.strip()) for w in weights_raw.split(",") if w.strip()], dtype=float)
 
         years_of_data = st.number_input(
             "Years of Historical Data",
@@ -147,9 +176,9 @@ def main():
 
         confidence_interval = st.number_input(
             "Confidence Interval",
-            value=0.95,
             min_value=0.90,
             max_value=0.99,
+            value=0.95,
             help="Select confidence interval for VaR (0.90 to 0.99)",
         )
 
@@ -182,48 +211,50 @@ def main():
 
             VaR = MonteCarlo.calculate_var(portfolio_sims, confidence_interval, float(portfolio_value))
 
-            settings_data = {
-                "Parameter": [
-                    "Stock Tickers",
-                    "Portfolio Weights",
-                    "Years of Data",
-                    "Start Date",
-                    "End Date (Date ran)",
-                    "Initial Portfolio Value ($)",
-                    "Days to Simulate",
-                    "Number of Simulations",
-                    "Confidence Interval",
-                    "Risk Level",
-                    "Value at Risk (VaR)",
-                ],
-                "Value": [
-                    ", ".join(stock_list),
-                    ", ".join(map(str, weights)),
-                    int(years_of_data),
-                    start_date,
-                    end_date,
-                    float(portfolio_value),
-                    int(days),
-                    int(simulations),
-                    f"{confidence_interval * 100:.2f}%",
-                    f"{risk_level * 100:.2f}%",
-                    f"${VaR:.2f}",
-                ],
-            }
-            settings_df = pd.DataFrame(settings_data).set_index("Parameter")
+            settings_df = pd.DataFrame(
+                {
+                    "Parameter": [
+                        "Stock Tickers",
+                        "Portfolio Weights",
+                        "Years of Data",
+                        "Start Date",
+                        "End Date (Date ran)",
+                        "Initial Portfolio Value ($)",
+                        "Days to Simulate",
+                        "Number of Simulations",
+                        "Confidence Interval",
+                        "Risk Level",
+                        "Value at Risk (VaR)",
+                    ],
+                    "Value": [
+                        ", ".join(stock_list),
+                        ", ".join(map(str, weights)),
+                        int(years_of_data),
+                        start_date,
+                        end_date,
+                        float(portfolio_value),
+                        int(days),
+                        int(simulations),
+                        f"{confidence_interval * 100:.2f}%",
+                        f"{risk_level * 100:.2f}%",
+                        f"${VaR:.2f}",
+                    ],
+                }
+            ).set_index("Parameter")
 
-            plot_col1, plot_col2 = st.columns(2)
+            c1, c2 = st.columns(2)
 
-            with plot_col1:
+            with c1:
                 st.write("### Simulation Results")
                 fig, ax = plt.subplots(figsize=(6, 4))
 
-                max_paths_to_plot = min(int(simulations), 300)
-                for i in range(max_paths_to_plot):
+                max_paths = min(int(simulations), 300)
+                for i in range(max_paths):
                     ax.plot(portfolio_sims[:, i], alpha=0.20, linewidth=0.7)
 
                 mean_path = np.mean(portfolio_sims, axis=1)
                 ax.plot(mean_path, linewidth=2, label="Mean Simulation")
+
                 ax.axhline(
                     y=(float(portfolio_value) - VaR),
                     linewidth=1,
@@ -236,7 +267,7 @@ def main():
                 ax.legend(loc="upper left")
                 st.pyplot(fig)
 
-            with plot_col2:
+            with c2:
                 st.write("### Distribution of Final Portfolio Values")
                 final_values = portfolio_sims[-1, :]
                 fig2, ax2 = plt.subplots(figsize=(6, 4))
@@ -266,4 +297,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
